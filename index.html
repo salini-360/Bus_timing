@@ -433,20 +433,32 @@ header p {
 
 </div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+import { getDatabase, ref, onValue, push, set, update, remove, get } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-database.js";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
 
-/* DATA */
+const firebaseConfig = {
+    apiKey: "AIzaSyBQ17Acw4Jow-uvbXaMyDOJjUokEZVC--M",
+    authDomain: "bus-timing-app-f7de3.firebaseapp.com",
+    databaseURL: "https://bus-timing-app-f7de3-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "bus-timing-app-f7de3",
+    storageBucket: "bus-timing-app-f7de3.firebasestorage.app",
+    messagingSenderId: "391757852899",
+    appId: "1:391757852899:web:b8838c64b6a3a3af3955d6",
+    measurementId: "G-M7XGXBXQD2"
+};
 
-let buses = JSON.parse(localStorage.getItem("busData")) || [];
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+const auth = getAuth(app);
+const busesRef = ref(db, "buses");
 
+let buses = [];
 let selectedSection = "Sedapatti";
-
 let currentView = "upcoming";
-
 let editingId = null;
-
-
-/* OLD SECTION DATA MIGRATION */
+let databaseReady = false;
 
 const oldSections = {
     "A": "Sedapatti",
@@ -455,412 +467,228 @@ const oldSections = {
     "D": "Sithayankottai"
 };
 
-buses = buses.map(bus => {
+function showDatabaseError(message) {
+    console.error(message);
+    alert(message);
+}
 
-    if(oldSections[bus.section]) {
-
-        bus.section = oldSections[bus.section];
-
-    }
-
-    return bus;
-
+// Sign in each visitor anonymously so database rules can require authentication.
+signInAnonymously(auth).catch((error) => {
+    console.error("Firebase sign-in failed:", error);
+    showDatabaseError("Could not connect to Bus Timing. Please refresh the page and try again. If it continues, check that Anonymous sign-in is enabled in Firebase Authentication.");
 });
 
-localStorage.setItem("busData", JSON.stringify(buses));
+onAuthStateChanged(auth, async (user) => {
+    if (!user || databaseReady) return;
+    databaseReady = true;
 
+    // Import old timings from this browser only if the shared Firebase list is empty.
+    try {
+        const snapshot = await get(busesRef);
+        const oldData = JSON.parse(localStorage.getItem("busData") || "[]");
+        const migrationDone = localStorage.getItem("busDataFirebaseMigrationDone");
+        if (!snapshot.exists() && !migrationDone && Array.isArray(oldData) && oldData.length > 0) {
+            for (const oldBus of oldData) {
+                const section = oldSections[oldBus.section] || oldBus.section;
+                if (oldBus.time && oldBus.name && oldBus.route && ["Sedapatti", "Sempatty", "Dindigul", "Sithayankottai"].includes(section)) {
+                    const newBusRef = push(busesRef);
+                    await set(newBusRef, {
+                        time: String(oldBus.time),
+                        name: String(oldBus.name).slice(0, 60),
+                        route: String(oldBus.route).slice(0, 120),
+                        section
+                    });
+                }
+            }
+            localStorage.setItem("busDataFirebaseMigrationDone", "yes");
+        } else if (!migrationDone) {
+            localStorage.setItem("busDataFirebaseMigrationDone", "yes");
+        }
+    } catch (error) {
+        console.error("Old timing migration failed:", error);
+    }
+
+    onValue(busesRef, (snapshot) => {
+        const data = snapshot.val() || {};
+        buses = Object.entries(data).map(([id, bus]) => ({
+            id,
+            time: bus.time || "",
+            name: bus.name || "",
+            route: bus.route || "",
+            section: oldSections[bus.section] || bus.section || "Sedapatti"
+        }));
+        displayBuses();
+    }, (error) => {
+        console.error("Database read failed:", error);
+        showDatabaseError("Unable to load bus timings. Please check the Firebase database rules.");
+    });
+});
 
 /* SELECT TOWN */
-
 function selectSection(section) {
-
     selectedSection = section;
-
     document.querySelectorAll(".section-btn").forEach(btn => {
-
-        btn.classList.remove("active");
-
-        if(btn.textContent.trim() === section) {
-
-            btn.classList.add("active");
-
-        }
-
+        btn.classList.toggle("active", btn.textContent.trim() === section);
     });
-
-    document.getElementById("sectionTitle").textContent =
-        section;
-
+    document.getElementById("sectionTitle").textContent = section;
     displayBuses();
-
 }
-
 
 /* CHANGE VIEW */
-
 function changeView(view) {
-
     currentView = view;
-
-    document.querySelectorAll(".nav-item").forEach(item => {
-
-        item.classList.remove("active");
-
-    });
-
-    if(view === "upcoming") {
-
-        document.querySelectorAll(".nav-item")[0]
-            .classList.add("active");
-
-        document.getElementById("displayInfo").textContent =
-            "Next 1.5 hours";
-
-    }
-
-    if(view === "all") {
-
-        document.querySelectorAll(".nav-item")[1]
-            .classList.add("active");
-
-        document.getElementById("displayInfo").textContent =
-            "All bus timings";
-
-    }
-
+    document.querySelectorAll(".nav-item").forEach(item => item.classList.remove("active"));
+    document.querySelectorAll(".nav-item")[view === "upcoming" ? 0 : 1].classList.add("active");
+    document.getElementById("displayInfo").textContent = view === "upcoming" ? "Next 1.5 hours" : "All bus timings";
     displayBuses();
-
 }
-
 
 /* DISPLAY BUS TIMINGS */
-
 function displayBuses() {
-
     const busList = document.getElementById("busList");
-
     const now = new Date();
-
-    const currentMinutes =
-        now.getHours() * 60 + now.getMinutes();
-
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
     const limitMinutes = currentMinutes + 90;
 
-
-    /* FILTER TOWN */
-
-    let filteredBuses = buses.filter(bus => {
-
-        return bus.section === selectedSection;
-
-    });
-
-
-    /* UPCOMING BUS VIEW */
-
-    if(currentView === "upcoming") {
-
+    let filteredBuses = buses.filter(bus => bus.section === selectedSection);
+    if (currentView === "upcoming") {
         filteredBuses = filteredBuses.filter(bus => {
-
-            const [hours, minutes] =
-                bus.time.split(":").map(Number);
-
+            const [hours, minutes] = bus.time.split(":").map(Number);
             const busMinutes = hours * 60 + minutes;
-
-            return busMinutes >= currentMinutes &&
-                   busMinutes <= limitMinutes;
-
+            return busMinutes >= currentMinutes && busMinutes <= limitMinutes;
         });
-
     }
+    filteredBuses.sort((a, b) => a.time.localeCompare(b.time));
 
-
-    /* SORT */
-
-    filteredBuses.sort((a, b) => {
-
-        return a.time.localeCompare(b.time);
-
-    });
-
-
-    /* EMPTY STATE */
-
-    if(filteredBuses.length === 0) {
-
-        if(currentView === "upcoming") {
-
-            busList.innerHTML = `
-                <div class="empty">
-                    <h3>No upcoming buses</h3>
-                    <p>No buses in the next 1 hour 30 minutes.</p>
-                    <p style="margin-top:10px">
-                        Click All Buses to see the complete timetable.
-                    </p>
-                </div>
-            `;
-
+    if (filteredBuses.length === 0) {
+        if (currentView === "upcoming") {
+            busList.innerHTML = `<div class="empty"><h3>No upcoming buses</h3><p>No buses in the next 1 hour 30 minutes.</p><p style="margin-top:10px">Click All Buses to see the complete timetable.</p></div>`;
         } else {
-
-            busList.innerHTML = `
-                <div class="empty">
-                    <h3>No bus timings added</h3>
-                    <p>Click + to add bus timings.</p>
-                </div>
-            `;
-
+            busList.innerHTML = `<div class="empty"><h3>No bus timings added</h3><p>Click + to add bus timings.</p></div>`;
         }
-
         return;
-
     }
 
-
-    /* SHOW BUS CARDS */
-
-    busList.innerHTML = filteredBuses.map(bus => {
-
-        return `
-
-            <div class="bus-card">
-
-                <div class="bus-top">
-
-                    <div>
-
-                        <div class="bus-time">
-                            ${formatTime(bus.time)}
-                        </div>
-
-                        <div class="bus-name">
-                            ${escapeHTML(bus.name)}
-                        </div>
-
-                        <div class="bus-route">
-                            📍 ${escapeHTML(bus.route)}
-                        </div>
-
-                        <div class="bus-route">
-                            ${escapeHTML(bus.section)}
-                        </div>
-
-                    </div>
-
-                    <div class="bus-actions">
-
-                        <button class="edit-btn"
-                            onclick="editBus(${bus.id})">
-                            ✏️
-                        </button>
-
-                        <button class="delete-btn"
-                            onclick="deleteBus(${bus.id})">
-                            🗑️
-                        </button>
-
-                    </div>
-
+    busList.innerHTML = filteredBuses.map(bus => `
+        <div class="bus-card">
+            <div class="bus-top">
+                <div>
+                    <div class="bus-time">${formatTime(bus.time)}</div>
+                    <div class="bus-name">${escapeHTML(bus.name)}</div>
+                    <div class="bus-route">📍 ${escapeHTML(bus.route)}</div>
+                    <div class="bus-route">${escapeHTML(bus.section)}</div>
                 </div>
-
+                <div class="bus-actions">
+                    <button class="edit-btn" onclick="editBus('${bus.id}')" aria-label="Edit bus">✏️</button>
+                    <button class="delete-btn" onclick="deleteBus('${bus.id}')" aria-label="Delete bus">🗑️</button>
+                </div>
             </div>
-
-        `;
-
-    }).join("");
-
+        </div>
+    `).join("");
 }
-
 
 /* FORMAT TIME */
-
 function formatTime(time) {
-
     let [hours, minutes] = time.split(":").map(Number);
-
-    let period = hours >= 12 ? "PM" : "AM";
-
+    const period = hours >= 12 ? "PM" : "AM";
     hours = hours % 12 || 12;
-
-    return hours + ":" +
-        String(minutes).padStart(2, "0") +
-        " " + period;
-
+    return hours + ":" + String(minutes).padStart(2, "0") + " " + period;
 }
-
 
 /* OPEN FORM */
-
 function openForm() {
-
     editingId = null;
-
-    document.getElementById("formTitle").textContent =
-        "Add Bus Timing";
-
+    document.getElementById("formTitle").textContent = "Add Bus Timing";
     document.getElementById("busForm").reset();
-
-    document.getElementById("busSection").value =
-        selectedSection;
-
-    document.getElementById("formOverlay").style.display =
-        "flex";
-
+    document.getElementById("busSection").value = selectedSection;
+    document.getElementById("formOverlay").style.display = "flex";
 }
-
 
 /* CLOSE FORM */
-
 function closeForm() {
-
-    document.getElementById("formOverlay").style.display =
-        "none";
-
+    document.getElementById("formOverlay").style.display = "none";
 }
 
-
-/* SAVE BUS */
-
-document.getElementById("busForm")
-.addEventListener("submit", function(e) {
-
+/* SAVE BUS TO FIREBASE */
+document.getElementById("busForm").addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (!auth.currentUser) {
+        showDatabaseError("Please wait for the app to connect, then try again.");
+        return;
+    }
 
     const bus = {
-
-        id: editingId || Date.now(),
-
         time: document.getElementById("busTime").value,
-
         name: document.getElementById("busName").value.trim(),
-
         route: document.getElementById("busRoute").value.trim(),
-
         section: document.getElementById("busSection").value
-
     };
 
-
-    if(editingId) {
-
-        buses = buses.map(existingBus => {
-
-            return existingBus.id === editingId
-                ? bus
-                : existingBus;
-
-        });
-
-    } else {
-
-        buses.push(bus);
-
+    if (!bus.name || bus.name.length > 60 || !bus.route || bus.route.length > 120) {
+        showDatabaseError("Please enter a bus name (maximum 60 characters) and route (maximum 120 characters).");
+        return;
     }
 
-
-    saveData();
-
-    closeForm();
-
-    displayBuses();
-
+    try {
+        if (editingId) {
+            await update(ref(db, `buses/${editingId}`), bus);
+        } else {
+            const newBusRef = push(busesRef);
+            await set(newBusRef, bus);
+        }
+        closeForm();
+    } catch (error) {
+        console.error("Saving bus failed:", error);
+        showDatabaseError("Could not save this timing. Please check your internet connection and Firebase rules.");
+    }
 });
 
-
 /* EDIT BUS */
-
 function editBus(id) {
-
-    const bus = buses.find(bus => bus.id === id);
-
-    if(!bus) return;
-
+    const bus = buses.find(item => item.id === id);
+    if (!bus) return;
     editingId = id;
-
-    document.getElementById("formTitle").textContent =
-        "Edit Bus Timing";
-
-    document.getElementById("busTime").value =
-        bus.time;
-
-    document.getElementById("busName").value =
-        bus.name;
-
-    document.getElementById("busRoute").value =
-        bus.route;
-
-    document.getElementById("busSection").value =
-        bus.section;
-
-    document.getElementById("formOverlay").style.display =
-        "flex";
-
+    document.getElementById("formTitle").textContent = "Edit Bus Timing";
+    document.getElementById("busTime").value = bus.time;
+    document.getElementById("busName").value = bus.name;
+    document.getElementById("busRoute").value = bus.route;
+    document.getElementById("busSection").value = bus.section;
+    document.getElementById("formOverlay").style.display = "flex";
 }
 
-
-/* DELETE BUS */
-
-function deleteBus(id) {
-
-    if(confirm("Are you sure you want to delete this bus timing?")) {
-
-        buses = buses.filter(bus => bus.id !== id);
-
-        saveData();
-
-        displayBuses();
-
+/* DELETE BUS FROM FIREBASE */
+async function deleteBus(id) {
+    if (!confirm("Are you sure you want to delete this bus timing?")) return;
+    try {
+        await remove(ref(db, `buses/${id}`));
+    } catch (error) {
+        console.error("Deleting bus failed:", error);
+        showDatabaseError("Could not delete this timing. Please check your internet connection and Firebase rules.");
     }
-
 }
-
-
-/* SAVE DATA */
-
-function saveData() {
-
-    localStorage.setItem("busData", JSON.stringify(buses));
-
-}
-
 
 /* ESCAPE HTML */
-
 function escapeHTML(text) {
-
-    return String(text).replace(/[&<>"']/g, function(char) {
-
-        return {
-
-            "&": "&amp;",
-            "<": "&lt;",
-            ">": "&gt;",
-            '"': "&quot;",
-            "'": "&#039;"
-
-        }[char];
-
-    });
-
+    return String(text).replace(/[&<>"']/g, char => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+    }[char]));
 }
 
+/* MAKE FUNCTIONS AVAILABLE TO EXISTING HTML BUTTONS */
+window.selectSection = selectSection;
+window.changeView = changeView;
+window.openForm = openForm;
+window.closeForm = closeForm;
+window.editBus = editBus;
+window.deleteBus = deleteBus;
 
-/* AUTOMATIC REFRESH */
-
-setInterval(function() {
-
-    if(currentView === "upcoming") {
-
-        displayBuses();
-
-    }
-
+/* AUTOMATIC REFRESH FOR UPCOMING BUS FILTER */
+setInterval(() => {
+    if (currentView === "upcoming") displayBuses();
 }, 30000);
 
-
 /* INITIAL DISPLAY */
-
 displayBuses();
-
 </script>
 
 </body>
